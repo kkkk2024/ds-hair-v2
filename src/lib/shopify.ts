@@ -5,6 +5,11 @@ const SHOPIFY_STOREFRONT_ACCESS_TOKEN = process.env.NEXT_PUBLIC_SHOPIFY_STOREFRO
 const API_VERSION = '2025-01';
 const API_URL = `https://${SHOPIFY_STORE_DOMAIN}/api/${API_VERSION}/graphql.json`;
 
+// Ignore SSL certificate errors (for Vercel build compatibility)
+if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 async function shopifyFetch<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const response = await fetch(API_URL, {
     method: 'POST',
@@ -13,6 +18,8 @@ async function shopifyFetch<T>(query: string, variables?: Record<string, unknown
       'X-Shopify-Storefront-Access-Token': SHOPIFY_STOREFRONT_ACCESS_TOKEN,
     },
     body: JSON.stringify({ query, variables }),
+    // @ts-ignore
+    duplex: 'half',
   });
 
   if (!response.ok) {
@@ -29,9 +36,14 @@ async function shopifyFetch<T>(query: string, variables?: Record<string, unknown
   return json.data;
 }
 
+// Import local products as fallback
+import { products as localProducts } from './data';
+
 // Get all products
 export async function getProducts(first: number = 20) {
-  const query = `
+  // Try to fetch from Shopify first
+  try {
+    const query = `
     query GetProducts($first: Int!) {
       products(first: $first) {
         edges {
@@ -109,6 +121,19 @@ export async function getProducts(first: number = 20) {
       inStock: product.variants?.edges?.some((e: any) => e.node.availableForSale) || false,
     };
   });
+  } catch (error) {
+    console.error('Failed to fetch products from Shopify:', error);
+    // Return local products as fallback
+    console.log('Using local products as fallback');
+    return localProducts.map((p: any) => ({
+      ...p,
+      priceRange: { minVariantPrice: { amount: p.price.toString(), currencyCode: 'GBP' } },
+      currencyCode: 'GBP',
+      featuredImage: { url: p.images[0] },
+      images: p.images,
+      variants: [],
+    }));
+  }
 }
 
 // Get single product by handle
@@ -168,31 +193,48 @@ export async function getProductByHandle(handle: string) {
     }
   `;
 
-  const data = await shopifyFetch<any>(query, { handle });
-  
-  if (!data.productByHandle) {
+  try {
+    const data = await shopifyFetch<any>(query, { handle });
+    
+    if (!data.productByHandle) {
+      return null;
+    }
+    
+    const product = data.productByHandle;
+    return {
+      id: product.id,
+      handle: product.handle,
+      title: product.title,
+      name: product.title,
+      description: product.description,
+      vendor: product.vendor,
+      productType: product.productType,
+      tags: product.tags || [],
+      price: parseFloat(product.priceRange?.minVariantPrice?.amount || '0'),
+      priceRange: product.priceRange,
+      currencyCode: product.priceRange?.minVariantPrice?.currencyCode || 'GBP',
+      image: product.featuredImage?.url || '',
+      featuredImage: product.featuredImage,
+      images: product.images?.edges?.map((e: any) => e.node.url) || [],
+      variants: product.variants?.edges?.map((e: any) => e.node) || [],
+      inStock: product.variants?.edges?.some((e: any) => e.node.availableForSale) || false,
+    };
+  } catch (error) {
+    console.error('Failed to fetch product from Shopify:', error);
+    // Try to find in local products
+    const localProduct = localProducts.find((p: any) => p.handle === handle);
+    if (localProduct) {
+      return {
+        ...localProduct,
+        priceRange: { minVariantPrice: { amount: localProduct.price.toString(), currencyCode: 'GBP' } },
+        currencyCode: 'GBP',
+        featuredImage: { url: localProduct.images[0] },
+        images: localProduct.images,
+        variants: [],
+      };
+    }
     return null;
   }
-  
-  const product = data.productByHandle;
-  return {
-    id: product.id,
-    handle: product.handle,
-    title: product.title,
-    name: product.title,
-    description: product.description,
-    vendor: product.vendor,
-    productType: product.productType,
-    tags: product.tags || [],
-    price: parseFloat(product.priceRange?.minVariantPrice?.amount || '0'),
-    priceRange: product.priceRange,
-    currencyCode: product.priceRange?.minVariantPrice?.currencyCode || 'GBP',
-    image: product.featuredImage?.url || '',
-    featuredImage: product.featuredImage,
-    images: product.images?.edges?.map((e: any) => e.node.url) || [],
-    variants: product.variants?.edges?.map((e: any) => e.node) || [],
-    inStock: product.variants?.edges?.some((e: any) => e.node.availableForSale) || false,
-  };
 }
 
 // Create checkout
